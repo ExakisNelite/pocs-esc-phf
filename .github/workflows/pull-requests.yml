@@ -33,5 +33,5 @@ jobs:
     with:
       review_label: 'reviewed'
       application_name: 'contoso'
-      log_analytics_dcr_ingest_url: ${{ vars.LOG_ANALYTICS_DCR_INGEST_URL }}
+      la_dcr_ingest_url: ${{ vars.LOG_ANALYTICS_DCR_INGEST_URL }}
     secrets: inherit
