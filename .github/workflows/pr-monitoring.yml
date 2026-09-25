@@ -1,0 +1,209 @@
+name: 'PR monitoring'
+
+on:
+  workflow_call:
+    inputs:
+      review_label:
+        description: 'Label whose addition marks the pull request as taken into account for review.'
+        type: string
+        required: false
+        default: 'review-in-progress'
+      la_dcr_ingest_url:
+        description: 'Full Log Analytics DCR logs ingestion URL (endpoint + /dataCollectionRules/<dcrImmutableId>/streams/<stream>?api-version=2023-01-01).'
+        type: string
+        required: true
+      application_name:
+        description: 'Functional application name used to group pull request metrics.'
+        type: string
+        required: false
+        default: ''
+      runners:
+        description: 'Runner used to send the metrics.'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+    secrets:
+      ARM_CLIENT_ID:
+        required: true
+      ARM_TENANT_ID:
+        required: true
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  id-token: write
+
+jobs:
+  pr-log-events:
+    name: 'Log PR lifecycle event'
+    runs-on: ${{ inputs.runners }}
+    steps:
+      - name: 'Build pull request lifecycle record'
+        id: record
+        uses: actions/github-script@v9
+        env:
+          REVIEW_LABEL: ${{ inputs.review_label }}
+          APPLICATION_NAME: ${{ inputs.application_name }}
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            const action = context.payload.action;
+            const reviewLabel = process.env.REVIEW_LABEL;
+
+            if (!pr) {
+              core.info('Not a pull_request event, nothing to log.');
+              core.setOutput('send', 'false');
+              return;
+            }
+
+            // Among "labeled" events only the review label starts the review phase.
+            if (action === 'labeled' && context.payload.label?.name !== reviewLabel) {
+              core.info(`Label '${context.payload.label?.name}' is not the review label '${reviewLabel}'. Skipping.`);
+              core.setOutput('send', 'false');
+              return;
+            }
+
+            const eventType = {
+              opened: 'created',
+              reopened: 'reopened',
+              labeled: 'review_started',
+              closed: pr.merged ? 'merged' : 'closed',
+            }[action];
+
+            if (!eventType) {
+              core.info(`Action '${action}' is not monitored. Skipping.`);
+              core.setOutput('send', 'false');
+              return;
+            }
+
+            // The timeline holds the reopen and label timestamps needed to rebuild the current PR cycle.
+            let timeline = [];
+            try {
+              timeline = await github.paginate(github.rest.issues.listEventsForTimeline, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                per_page: 100,
+              });
+            } catch (error) {
+              core.warning(`Unable to read the PR timeline: ${error.message}`);
+            }
+
+            const lastEventTime = (predicate) => {
+              const times = timeline
+                .filter(predicate)
+                .map((item) => Date.parse(item.created_at))
+                .filter((value) => !Number.isNaN(value));
+              return times.length ? Math.max(...times) : null;
+            };
+
+            const createdAt = Date.parse(pr.created_at);
+            const lastReopenedAt = action === 'reopened'
+              ? Date.parse(pr.updated_at)
+              : lastEventTime((item) => item.event === 'reopened');
+
+            // Reopening a PR restarts the cycle: lead times are measured from that moment.
+            const cycleStartAt = lastReopenedAt !== null && lastReopenedAt > createdAt ? lastReopenedAt : createdAt;
+
+            let reviewStartedAt = action === 'labeled'
+              ? Date.parse(pr.updated_at)
+              : lastEventTime((item) => item.event === 'labeled' && item.label?.name === reviewLabel);
+            if (reviewStartedAt !== null && reviewStartedAt < cycleStartAt) {
+              reviewStartedAt = null;
+            }
+
+            const closedAt = action === 'closed'
+              ? Date.parse(pr.closed_at ?? new Date().toISOString())
+              : null;
+
+            const eventTime = {
+              created: createdAt,
+              reopened: cycleStartAt,
+              review_started: reviewStartedAt,
+              merged: closedAt,
+              closed: closedAt,
+            }[eventType];
+
+            const seconds = (to, from) => (to !== null && from !== null ? Math.round((to - from) / 1000) : null);
+            const iso = (value) => (value !== null && value !== undefined ? new Date(value).toISOString() : null);
+
+            const record = {
+              TimeGenerated: iso(eventTime ?? Date.now()),
+              c_application: process.env.APPLICATION_NAME || context.repo.repo,
+              c_repo: `${context.serverUrl.replace('https://', '')}/${context.repo.owner}/${context.repo.repo}`,
+              c_prNumber: pr.number,
+              c_prTitle: pr.title,
+              c_prAuthor: pr.user?.login ?? '',
+              c_prUrl: pr.html_url,
+              c_baseRef: pr.base?.ref ?? '',
+              c_headRef: pr.head?.ref ?? '',
+              c_eventType: eventType,
+              c_eventAction: action,
+              c_actor: context.actor,
+              c_reviewLabel: reviewLabel,
+              c_labels: (pr.labels ?? []).map((label) => label.name).join(','),
+              c_isDraft: Boolean(pr.draft),
+              c_merged: Boolean(pr.merged),
+              c_createdAt: iso(createdAt),
+              c_cycleStartAt: iso(cycleStartAt),
+              c_reviewStartedAt: iso(reviewStartedAt),
+              c_closedAt: iso(closedAt),
+              // Lead time to review: cycle start -> review label added.
+              c_leadTimeToReviewSec: seconds(reviewStartedAt, cycleStartAt),
+              // Review duration: review label added -> PR closed/merged.
+              c_reviewDurationSec: seconds(closedAt, reviewStartedAt),
+              // Total lead time: cycle start -> PR closed/merged.
+              c_totalLeadTimeSec: seconds(closedAt, cycleStartAt),
+              c_additions: pr.additions ?? 0,
+              c_deletions: pr.deletions ?? 0,
+              c_changedFiles: pr.changed_files ?? 0,
+              c_commits: pr.commits ?? 0,
+              c_workflowRunId: `${context.runId}`,
+            };
+
+            // Null metrics are not measurable yet for this event, drop them from the payload.
+            const payload = [Object.fromEntries(Object.entries(record).filter(([, value]) => value !== null))];
+
+            fs.writeFileSync('pr-event.json', JSON.stringify(payload));
+            core.info(JSON.stringify(payload, null, 2));
+            core.setOutput('send', 'true');
+
+      - name: 'Send record to Log Analytics via DCR'
+        if: steps.record.outputs.send == 'true'
+        shell: bash
+        env:
+          LA_DCR_INGEST_URL: ${{ inputs.la_dcr_ingest_url }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+        run: |
+          set -euo pipefail
+
+          OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r '.value')
+
+          ACCESS_TOKEN=$(curl -sS -X POST "https://login.microsoftonline.com/${ARM_TENANT_ID}/oauth2/v2.0/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "client_id=${ARM_CLIENT_ID}" \
+            --data-urlencode "scope=https://monitor.azure.com/.default" \
+            --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            --data-urlencode "client_assertion=${OIDC_TOKEN}" \
+            --data-urlencode "grant_type=client_credentials" | jq -r '.access_token')
+
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" == "null" ]; then
+            echo "::error::Unable to obtain an Azure access token for the Logs Ingestion API."
+            exit 1
+          fi
+
+          HTTP_CODE=$(curl -sS -o /tmp/ingest-response.txt -w "%{http_code}" -X POST "$LA_DCR_INGEST_URL" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @pr-event.json)
+
+          echo "Ingestion HTTP status: $HTTP_CODE"
+          cat /tmp/ingest-response.txt
+          if [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Log Analytics ingestion failed."
+            exit 1
+          fi

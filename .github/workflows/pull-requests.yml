@@ -1,0 +1,36 @@
+name: Manage Pull Requests
+run-name: Manage event for PR ${{ github.event.pull_request.number }} 
+
+on:
+  pull_request:
+    types:
+      - opened
+      - labeled
+      - edited
+      - reopened
+      - synchronize
+      - closed
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  id-token: write
+
+jobs:
+  notify-on-pr:
+    uses: ./.github/workflows/notify-on-pr.yml
+    secrets: inherit
+
+  # monitor-pr:
+  #   uses: ./.github/workflows/monitor-pr.yml
+  #   with:
+  #     review_label: 'reviewed'
+  #     application_name: 'contoso'
+  #     log_analytics_dcr_ingest_url: ${{ secrets.LOG_ANALYTICS_DCR_INGEST_URL }}
+  #   secrets:
+  #     ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+  #     ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}

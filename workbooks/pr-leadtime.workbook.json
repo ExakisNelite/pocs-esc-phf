@@ -1,0 +1,311 @@
+{
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "## Pull Request — Lead time de prise en charge et de revue\n\nObjectifs de service : **prise en charge sous 48h ouvrées**, **revue terminée sous 96h ouvrées**.\nLes heures ouvrées excluent les week-ends ; les jours fériés ne sont pas déduits.\nUne PR clôturée sans que le label de revue ait été posé est comptée séparément (« sans prise en charge ») et non comme une revue conforme."
+      },
+      "name": "header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "b1e1a0d2-0f5a-4a1e-9d1a-1f0a2b3c4d5e",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Période",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 7776000000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 2592000000 },
+                { "durationMs": 5184000000 },
+                { "durationMs": 7776000000 },
+                { "durationMs": 15552000000 },
+                { "durationMs": 31536000000 }
+              ],
+              "allowCustom": true
+            }
+          },
+          {
+            "id": "c2f2b1e3-1a6b-4b2f-8e2b-2a1b3c4d5e6f",
+            "version": "KqlParameterItem/1.0",
+            "name": "Application",
+            "label": "Application",
+            "type": 2,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "isRequired": true,
+            "query": "__TABLE__\n| where TimeGenerated {TimeRange}\n| distinct c_application\n| order by c_application asc\n| summarize v = make_list(c_application)\n| extend v = array_concat(pack_array('*'), v)\n| mv-expand v to typeof(string)\n| project value = v, label = iff(v == '*', 'Toutes', v), selected = v == '*'",
+            "typeSettings": {
+              "showDefault": false
+            },
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "value": ["*"]
+          },
+          {
+            "id": "d3a3c2f4-2b7c-4c3a-9f3c-3b2c4d5e6f70",
+            "version": "KqlParameterItem/1.0",
+            "name": "Repo",
+            "label": "Dépôt",
+            "type": 2,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "isRequired": true,
+            "query": "__TABLE__\n| where TimeGenerated {TimeRange}\n| where '*' in ({Application}) or c_application in ({Application})\n| distinct c_repo\n| order by c_repo asc\n| summarize v = make_list(c_repo)\n| extend v = array_concat(pack_array('*'), v)\n| mv-expand v to typeof(string)\n| project value = v, label = iff(v == '*', 'Tous', v), selected = v == '*'",
+            "typeSettings": {
+              "showDefault": false
+            },
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "value": ["*"]
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "### État courant du flux de revue\n\nCes compteurs ignorent la période sélectionnée : ils décrivent les PR ouvertes à l'instant présent."
+      },
+      "name": "text-etat-courant"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "// Heures ouvrées : week-ends exclus, jours ouvrés comptés 24h\nlet MondayEpoch = datetime(1970-01-05);\nlet dayIdx = (t: datetime) { toint(datetime_diff('day', startofday(t), MondayEpoch)) };\nlet weekendDaysBefore = (n: int) { 2 * (n / 7) + max_of(0, min_of(2, n % 7 - 5)) };\nlet bizHours = (s: datetime, e: datetime) {\n    let s2 = case(dayofweek(s) == 6d, startofday(s) + 2d, dayofweek(s) == 0d, startofday(s) + 1d, s);\n    let e2 = case(dayofweek(e) == 6d, startofday(e), dayofweek(e) == 0d, startofday(e) - 1d, e);\n    iff(e2 <= s2, 0.0, datetime_diff('second', e2, s2) / 3600.0 - 24.0 * (weekendDaysBefore(dayIdx(e2)) - weekendDaysBefore(dayIdx(s2))))\n};\nlet lookback = 365d;\nlet closedCycles = __TABLE__\n    | where TimeGenerated > ago(lookback) and c_eventType in ('merged', 'closed')\n    | distinct c_repo, c_prNumber, c_cycleStartAt;\nlet openCycles = __TABLE__\n    | where TimeGenerated > ago(lookback)\n    | where c_eventType in ('created', 'reopened', 'review_started')\n    | where '*' in ({Application}) or c_application in ({Application})\n    | where '*' in ({Repo}) or c_repo in ({Repo})\n    | summarize arg_max(TimeGenerated, *) by c_repo, c_prNumber, c_cycleStartAt\n    | join kind=leftanti closedCycles on c_repo, c_prNumber, c_cycleStartAt;\nlet waiting = openCycles\n    | where c_eventType != 'review_started'\n    | extend H = bizHours(todatetime(c_cycleStartAt), now());\nlet inReview = openCycles\n    | where c_eventType == 'review_started'\n    | extend H = bizHours(todatetime(c_reviewStartedAt), now());\nunion\n  (waiting | summarize Nb = count() | extend Indicateur = '1. À prendre en charge'),\n  (waiting | where H <= 48 | summarize Nb = count() | extend Indicateur = '2. Dont < 48h ouvrées'),\n  (waiting | where H > 48 | summarize Nb = count() | extend Indicateur = '3. Dont > 48h ouvrées'),\n  (inReview | summarize Nb = count() | extend Indicateur = '4. En cours de revue'),\n  (inReview | where H > 96 | summarize Nb = count() | extend Indicateur = '5. Dont revue > 96h ouvrées')\n| project Indicateur, Nb\n| sort by Indicateur asc",
+        "size": 3,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": {
+            "columnMatch": "Indicateur",
+            "formatter": 1
+          },
+          "leftContent": {
+            "columnMatch": "Nb",
+            "formatter": 12,
+            "formatOptions": {
+              "palette": "auto"
+            },
+            "numberFormat": {
+              "unit": 17,
+              "options": {
+                "style": "decimal",
+                "maximumFractionDigits": 0
+              }
+            }
+          },
+          "showBorder": true,
+          "size": "auto"
+        }
+      },
+      "name": "tiles-etat-courant"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "### PR hors délai\n\nTri par dépassement décroissant. Liste vide = aucun engagement rompu."
+      },
+      "name": "text-hors-delai"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "// Heures ouvrées : week-ends exclus, jours ouvrés comptés 24h\nlet MondayEpoch = datetime(1970-01-05);\nlet dayIdx = (t: datetime) { toint(datetime_diff('day', startofday(t), MondayEpoch)) };\nlet weekendDaysBefore = (n: int) { 2 * (n / 7) + max_of(0, min_of(2, n % 7 - 5)) };\nlet bizHours = (s: datetime, e: datetime) {\n    let s2 = case(dayofweek(s) == 6d, startofday(s) + 2d, dayofweek(s) == 0d, startofday(s) + 1d, s);\n    let e2 = case(dayofweek(e) == 6d, startofday(e), dayofweek(e) == 0d, startofday(e) - 1d, e);\n    iff(e2 <= s2, 0.0, datetime_diff('second', e2, s2) / 3600.0 - 24.0 * (weekendDaysBefore(dayIdx(e2)) - weekendDaysBefore(dayIdx(s2))))\n};\nlet lookback = 365d;\nlet closedCycles = __TABLE__\n    | where TimeGenerated > ago(lookback) and c_eventType in ('merged', 'closed')\n    | distinct c_repo, c_prNumber, c_cycleStartAt;\n__TABLE__\n| where TimeGenerated > ago(lookback)\n| where c_eventType in ('created', 'reopened', 'review_started')\n| where '*' in ({Application}) or c_application in ({Application})\n| where '*' in ({Repo}) or c_repo in ({Repo})\n| summarize arg_max(TimeGenerated, *) by c_repo, c_prNumber, c_cycleStartAt\n| join kind=leftanti closedCycles on c_repo, c_prNumber, c_cycleStartAt\n| extend EnRevue = c_eventType == 'review_started'\n| extend Etat = iff(EnRevue, 'En revue', 'À prendre en charge'),\n         Cible = iff(EnRevue, 96.0, 48.0),\n         H = iff(EnRevue, bizHours(todatetime(c_reviewStartedAt), now()), bizHours(todatetime(c_cycleStartAt), now()))\n| extend Depassement_h = round(H - Cible, 1)\n| where Depassement_h > 0\n| project Application = c_application, Depot = c_repo, PR = c_prNumber, Titre = c_prTitle, Auteur = c_prAuthor, Etat, Ecoule_h = round(H, 1), Cible_h = Cible, Depassement_h, Lien = c_prUrl\n| sort by Depassement_h desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Depassement_h",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "red"
+              },
+              "numberFormat": {
+                "unit": 24,
+                "options": {
+                  "style": "decimal",
+                  "maximumFractionDigits": 1
+                }
+              }
+            },
+            {
+              "columnMatch": "Lien",
+              "formatter": 7,
+              "formatOptions": {
+                "linkTarget": "Url",
+                "linkLabel": "Ouvrir"
+              }
+            }
+          ],
+          "filter": true
+        }
+      },
+      "name": "grid-hors-delai"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "### Volume de revues mois par mois\n\nLes PR sont rattachées au mois de leur clôture."
+      },
+      "name": "text-mensuel"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "// Heures ouvrées : week-ends exclus, jours ouvrés comptés 24h\nlet MondayEpoch = datetime(1970-01-05);\nlet dayIdx = (t: datetime) { toint(datetime_diff('day', startofday(t), MondayEpoch)) };\nlet weekendDaysBefore = (n: int) { 2 * (n / 7) + max_of(0, min_of(2, n % 7 - 5)) };\nlet bizHours = (s: datetime, e: datetime) {\n    let s2 = case(dayofweek(s) == 6d, startofday(s) + 2d, dayofweek(s) == 0d, startofday(s) + 1d, s);\n    let e2 = case(dayofweek(e) == 6d, startofday(e), dayofweek(e) == 0d, startofday(e) - 1d, e);\n    iff(e2 <= s2, 0.0, datetime_diff('second', e2, s2) / 3600.0 - 24.0 * (weekendDaysBefore(dayIdx(e2)) - weekendDaysBefore(dayIdx(s2))))\n};\n__TABLE__\n| where TimeGenerated {TimeRange}\n| where c_eventType in ('merged', 'closed')\n| where '*' in ({Application}) or c_application in ({Application})\n| where '*' in ({Repo}) or c_repo in ({Repo})\n| extend PriseEnCharge_h = bizHours(todatetime(c_cycleStartAt), todatetime(c_reviewStartedAt)),\n         Revue_h = bizHours(todatetime(c_reviewStartedAt), todatetime(c_closedAt))\n| summarize\n    ['Revue conforme'] = countif(isnotnull(c_reviewStartedAt) and PriseEnCharge_h <= 48 and Revue_h <= 96),\n    ['Prise en charge > 48h'] = countif(isnotnull(c_reviewStartedAt) and PriseEnCharge_h > 48),\n    ['Revue > 96h'] = countif(isnotnull(c_reviewStartedAt) and PriseEnCharge_h <= 48 and Revue_h > 96),\n    ['Sans prise en charge'] = countif(isnull(c_reviewStartedAt))\n  by Mois = startofmonth(TimeGenerated)\n| sort by Mois asc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart",
+        "chartSettings": {
+          "xAxis": "Mois",
+          "group": null,
+          "createOtherGroup": null,
+          "seriesLabelSettings": [
+            { "seriesName": "Revue conforme", "color": "green" },
+            { "seriesName": "Prise en charge > 48h", "color": "orange" },
+            { "seriesName": "Revue > 96h", "color": "redBright" },
+            { "seriesName": "Sans prise en charge", "color": "gray" }
+          ]
+        }
+      },
+      "name": "chart-mensuel"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "// Heures ouvrées : week-ends exclus, jours ouvrés comptés 24h\nlet MondayEpoch = datetime(1970-01-05);\nlet dayIdx = (t: datetime) { toint(datetime_diff('day', startofday(t), MondayEpoch)) };\nlet weekendDaysBefore = (n: int) { 2 * (n / 7) + max_of(0, min_of(2, n % 7 - 5)) };\nlet bizHours = (s: datetime, e: datetime) {\n    let s2 = case(dayofweek(s) == 6d, startofday(s) + 2d, dayofweek(s) == 0d, startofday(s) + 1d, s);\n    let e2 = case(dayofweek(e) == 6d, startofday(e), dayofweek(e) == 0d, startofday(e) - 1d, e);\n    iff(e2 <= s2, 0.0, datetime_diff('second', e2, s2) / 3600.0 - 24.0 * (weekendDaysBefore(dayIdx(e2)) - weekendDaysBefore(dayIdx(s2))))\n};\n__TABLE__\n| where TimeGenerated {TimeRange}\n| where c_eventType in ('merged', 'closed')\n| where '*' in ({Application}) or c_application in ({Application})\n| where '*' in ({Repo}) or c_repo in ({Repo})\n| extend PriseEnCharge_h = bizHours(todatetime(c_cycleStartAt), todatetime(c_reviewStartedAt)),\n         Revue_h = bizHours(todatetime(c_reviewStartedAt), todatetime(c_closedAt))\n| summarize\n    Cloturees = count(),\n    Revues = countif(isnotnull(c_reviewStartedAt)),\n    SansPriseEnCharge = countif(isnull(c_reviewStartedAt)),\n    OkPriseEnCharge = countif(PriseEnCharge_h <= 48),\n    OkRevue = countif(Revue_h <= 96),\n    P85PriseEnCharge_h = round(percentile(PriseEnCharge_h, 85), 1),\n    P85Revue_h = round(percentile(Revue_h, 85), 1)\n  by Mois = startofmonth(TimeGenerated)\n| extend ['% prise en charge <= 48h'] = iff(Revues == 0, real(null), round(100.0 * OkPriseEnCharge / Revues, 1)),\n         ['% revue <= 96h'] = iff(Revues == 0, real(null), round(100.0 * OkRevue / Revues, 1))\n| project Mois, Cloturees, Revues, SansPriseEnCharge, ['% prise en charge <= 48h'], ['% revue <= 96h'], P85PriseEnCharge_h, P85Revue_h\n| sort by Mois asc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "% prise en charge <= 48h",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "greenRed"
+              },
+              "numberFormat": {
+                "unit": 1,
+                "options": {
+                  "style": "decimal",
+                  "maximumFractionDigits": 1
+                }
+              }
+            },
+            {
+              "columnMatch": "% revue <= 96h",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "greenRed"
+              },
+              "numberFormat": {
+                "unit": 1,
+                "options": {
+                  "style": "decimal",
+                  "maximumFractionDigits": 1
+                }
+              }
+            }
+          ]
+        }
+      },
+      "name": "grid-conformite-mensuelle"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "### Comparaison entre applications"
+      },
+      "name": "text-comparaison"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "// Heures ouvrées : week-ends exclus, jours ouvrés comptés 24h\nlet MondayEpoch = datetime(1970-01-05);\nlet dayIdx = (t: datetime) { toint(datetime_diff('day', startofday(t), MondayEpoch)) };\nlet weekendDaysBefore = (n: int) { 2 * (n / 7) + max_of(0, min_of(2, n % 7 - 5)) };\nlet bizHours = (s: datetime, e: datetime) {\n    let s2 = case(dayofweek(s) == 6d, startofday(s) + 2d, dayofweek(s) == 0d, startofday(s) + 1d, s);\n    let e2 = case(dayofweek(e) == 6d, startofday(e), dayofweek(e) == 0d, startofday(e) - 1d, e);\n    iff(e2 <= s2, 0.0, datetime_diff('second', e2, s2) / 3600.0 - 24.0 * (weekendDaysBefore(dayIdx(e2)) - weekendDaysBefore(dayIdx(s2))))\n};\n__TABLE__\n| where TimeGenerated {TimeRange}\n| where c_eventType in ('merged', 'closed')\n| where '*' in ({Application}) or c_application in ({Application})\n| where '*' in ({Repo}) or c_repo in ({Repo})\n| extend PriseEnCharge_h = bizHours(todatetime(c_cycleStartAt), todatetime(c_reviewStartedAt)),\n         Revue_h = bizHours(todatetime(c_reviewStartedAt), todatetime(c_closedAt))\n| summarize\n    Cloturees = count(),\n    Mergees = countif(c_eventType == 'merged'),\n    Revues = countif(isnotnull(c_reviewStartedAt)),\n    SansPriseEnCharge = countif(isnull(c_reviewStartedAt)),\n    OkPriseEnCharge = countif(PriseEnCharge_h <= 48),\n    OkRevue = countif(Revue_h <= 96),\n    P85PriseEnCharge_h = round(percentile(PriseEnCharge_h, 85), 1),\n    P85Revue_h = round(percentile(Revue_h, 85), 1)\n  by Application = c_application, Depot = c_repo\n| extend ['% prise en charge <= 48h'] = iff(Revues == 0, real(null), round(100.0 * OkPriseEnCharge / Revues, 1)),\n         ['% revue <= 96h'] = iff(Revues == 0, real(null), round(100.0 * OkRevue / Revues, 1))\n| project Application, Depot, Cloturees, Mergees, Revues, SansPriseEnCharge, ['% prise en charge <= 48h'], ['% revue <= 96h'], P85PriseEnCharge_h, P85Revue_h\n| sort by ['% revue <= 96h'] asc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "% prise en charge <= 48h",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "greenRed"
+              },
+              "numberFormat": {
+                "unit": 1,
+                "options": {
+                  "style": "decimal",
+                  "maximumFractionDigits": 1
+                }
+              }
+            },
+            {
+              "columnMatch": "% revue <= 96h",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "greenRed"
+              },
+              "numberFormat": {
+                "unit": 1,
+                "options": {
+                  "style": "decimal",
+                  "maximumFractionDigits": 1
+                }
+              }
+            },
+            {
+              "columnMatch": "SansPriseEnCharge",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "red"
+              }
+            }
+          ],
+          "filter": true,
+          "sortBy": [
+            {
+              "itemKey": "% revue <= 96h",
+              "sortOrder": 1
+            }
+          ]
+        }
+      },
+      "name": "grid-comparaison"
+    }
+  ],
+  "fallbackResourceIds": [],
+  "styleSettings": {},
+  "fromTemplateId": "lv-pr-leadtime"
+}

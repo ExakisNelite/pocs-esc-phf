@@ -1,0 +1,118 @@
+name: 'PR notification'
+
+on:
+  workflow_call:
+    inputs:
+      notify_actions:
+        description: 'Comma-separated pull request actions to notify. Use merged to notify only merged closed pull requests.'
+        type: string
+        required: false
+        default: 'opened,reopened'
+      teams_theme_color:
+        description: 'Microsoft Teams MessageCard theme color.'
+        type: string
+        required: false
+        default: '0076D7'
+      title_prefix:
+        description: 'Prefix used in the Teams notification title.'
+        type: string
+        required: false
+        default: 'Pull Request'
+      runners:
+        description: 'Runner used to send the notification.'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+    secrets:
+      TEAMS_WEBHOOK_URL:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-notification:
+    name: 'Notify PR status'
+    runs-on: ${{ inputs.runners }}
+    steps:
+      - name: Notify Microsoft Teams
+        uses: actions/github-script@v9 # 3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          NOTIFY_ACTIONS: ${{ inputs.notify_actions }}
+          TEAMS_THEME_COLOR: ${{ inputs.teams_theme_color }}
+          TITLE_PREFIX: ${{ inputs.title_prefix }}
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const action = context.payload.action;
+            const teamsWebhookUrl = process.env.TEAMS_WEBHOOK_URL;
+            const notifyActions = process.env.NOTIFY_ACTIONS
+              .split(',')
+              .map((value) => value.trim())
+              .filter(Boolean);
+
+            if (!pr) {
+              core.info('This workflow was not triggered by a pull_request event. Skipping notification.');
+              return;
+            }
+
+            if (!teamsWebhookUrl) {
+              core.setFailed('TEAMS_WEBHOOK_URL secret is required to send PR notifications.');
+              return;
+            }
+
+            const notificationAction = action === 'closed' && pr.merged ? 'merged' : action;
+            if (!notifyActions.includes(notificationAction)) {
+              core.info(`PR #${pr.number} action '${notificationAction}' is not configured for notification.`);
+              return;
+            }
+
+            const message = {
+              '@type': 'MessageCard',
+              '@context': 'http://schema.org/extensions',
+              summary: `PR #${pr.number} Notification`,
+              themeColor: process.env.TEAMS_THEME_COLOR,
+              title: `${process.env.TITLE_PREFIX} #${pr.number} ${notificationAction}`,
+              sections: [
+                {
+                  activityTitle: `Pull Request #${pr.number}: ${pr.title}`,
+                  activitySubtitle: `by ${pr.user.login}`,
+                  facts: [
+                    {
+                      name: 'Repository:',
+                      value: pr.base.repo.full_name,
+                    },
+                    {
+                      name: 'Branch:',
+                      value: pr.head.ref,
+                    },
+                    {
+                      name: 'Target:',
+                      value: pr.base.ref,
+                    },
+                    {
+                      name: 'URL:',
+                      value: pr.html_url,
+                    },
+                  ],
+                  markdown: true,
+                },
+              ],
+            };
+
+            const response = await fetch(teamsWebhookUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(message),
+            });
+
+            if (!response.ok) {
+              const responseBody = await response.text();
+              core.setFailed(`Error sending notification to Microsoft Teams: ${response.status} ${response.statusText} ${responseBody}`);
+              return;
+            }
+
+            core.info('Notification sent to Microsoft Teams.');
