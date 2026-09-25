@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   notify-on-pr:
-    uses: ./.github/workflows/notify-on-pr.yml
+    uses: ./.github/workflows/pr-notification.yml
     secrets: inherit
 
   # monitor-pr:
