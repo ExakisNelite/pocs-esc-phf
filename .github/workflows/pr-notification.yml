@@ -9,7 +9,7 @@ on:
         required: false
         default: 'opened,reopened'
       teams_theme_color:
-        description: 'Microsoft Teams MessageCard theme color.'
+        description: 'Deprecated: Adaptive Cards do not support custom hex colors. Kept for backward compatibility, value is ignored.'
         type: string
         required: false
         default: '0076D7'
@@ -40,7 +40,6 @@ jobs:
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           NOTIFY_ACTIONS: ${{ inputs.notify_actions }}
-          TEAMS_THEME_COLOR: ${{ inputs.teams_theme_color }}
           TITLE_PREFIX: ${{ inputs.title_prefix }}
         with:
           script: |
@@ -68,35 +67,59 @@ jobs:
               return;
             }
 
+            // The Power Automate 'When a Teams webhook request is received' endpoint expects an
+            // Adaptive Card envelope. The legacy MessageCard format is not supported by it.
             const message = {
-              '@type': 'MessageCard',
-              '@context': 'http://schema.org/extensions',
-              summary: `PR #${pr.number} Notification`,
-              themeColor: process.env.TEAMS_THEME_COLOR,
-              title: `${process.env.TITLE_PREFIX} #${pr.number} ${notificationAction}`,
-              sections: [
+              type: 'message',
+              attachments: [
                 {
-                  activityTitle: `Pull Request #${pr.number}: ${pr.title}`,
-                  activitySubtitle: `by ${pr.user.login}`,
-                  facts: [
-                    {
-                      name: 'Repository:',
-                      value: pr.base.repo.full_name,
-                    },
-                    {
-                      name: 'Branch:',
-                      value: pr.head.ref,
-                    },
-                    {
-                      name: 'Target:',
-                      value: pr.base.ref,
-                    },
-                    {
-                      name: 'URL:',
-                      value: pr.html_url,
-                    },
-                  ],
-                  markdown: true,
+                  contentType: 'application/vnd.microsoft.card.adaptive',
+                  contentUrl: null,
+                  content: {
+                    $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+                    type: 'AdaptiveCard',
+                    version: '1.4',
+                    msteams: { width: 'Full' },
+                    body: [
+                      {
+                        type: 'TextBlock',
+                        text: `${process.env.TITLE_PREFIX} #${pr.number} ${notificationAction}`,
+                        weight: 'Bolder',
+                        size: 'Large',
+                        color: 'Accent',
+                        wrap: true,
+                      },
+                      {
+                        type: 'TextBlock',
+                        text: pr.title,
+                        weight: 'Bolder',
+                        size: 'Medium',
+                        wrap: true,
+                      },
+                      {
+                        type: 'TextBlock',
+                        text: `by ${pr.user.login}`,
+                        isSubtle: true,
+                        spacing: 'None',
+                        wrap: true,
+                      },
+                      {
+                        type: 'FactSet',
+                        facts: [
+                          { title: 'Repository', value: pr.base.repo.full_name },
+                          { title: 'Branch', value: pr.head.ref },
+                          { title: 'Target', value: pr.base.ref },
+                        ],
+                      },
+                    ],
+                    actions: [
+                      {
+                        type: 'Action.OpenUrl',
+                        title: 'View pull request',
+                        url: pr.html_url,
+                      },
+                    ],
+                  },
                 },
               ],
             };
