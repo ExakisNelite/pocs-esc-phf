@@ -3,6 +3,11 @@ variable "resource_group_name" {
   type        = string
 }
 
+variable "subscription_id" {
+  description = "Azure subscription ID where the resources will be created."
+  type        = string
+}
+
 variable "location" {
   description = "Azure region of the workbook."
   type        = string

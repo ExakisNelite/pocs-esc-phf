@@ -28,12 +28,10 @@ jobs:
       notify_actions: 'opened,reopened,closed,merged'
       title_prefix: 'Pull Request Contoso'
 
-  # monitor-pr:
-  #   uses: ./.github/workflows/monitor-pr.yml
-  #   with:
-  #     review_label: 'reviewed'
-  #     application_name: 'contoso'
-  #     log_analytics_dcr_ingest_url: ${{ secrets.LOG_ANALYTICS_DCR_INGEST_URL }}
-  #   secrets:
-  #     ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-  #     ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+  monitor-pr:
+    uses: ./.github/workflows/pr-monitoring.yml
+    with:
+      review_label: 'reviewed'
+      application_name: 'contoso'
+      log_analytics_dcr_ingest_url: ${{ vars.LOG_ANALYTICS_DCR_INGEST_URL }}
+    secrets: inherit

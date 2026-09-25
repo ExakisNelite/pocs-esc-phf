@@ -3,7 +3,7 @@ locals {
   workbook_source_id = lower(var.log_analytics_workspace_id)
   # The JSON ships with a __TABLE__ placeholder so the custom table can be renamed without touching the workbook.
   workbook_data_json = replace(
-    file("${path.module}/workbooks/pr-leadtime.workbook.json"),
+    file("${path.module}/../workbooks/pr-leadtime.workbook.json"),
     "__TABLE__",
     var.log_table_name
   )

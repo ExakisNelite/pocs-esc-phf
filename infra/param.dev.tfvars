@@ -1,0 +1,14 @@
+data_collection_endpoint_name = "dce-pr-metrics"
+data_collection_rule_name     = "dcr-pr-metrics"
+ingestion_principal_ids       = []
+location                      = "westeurope"
+log_analytics_workspace_id    = "/subscriptions/39c87760-f7b4-4479-ba4c-a0ed22bc35e2/resourceGroups/rg-test-workbook/providers/Microsoft.OperationalInsights/workspaces/law-test-workbook"
+log_table_name                = "PullRequestMetrics_CL"
+public_network_access_enabled = true
+resource_group_name           = "rg-test-workbook"
+table_retention_in_days       = 30
+table_total_retention_in_days = 730
+tags                          = {}
+workbook_display_name         = "Pull Request - Lead time de revue"
+workbook_name                 = "f18715f2-97e5-42f3-bda2-46fea8d467eb"
+subscription_id               = "39c87760-f7b4-4479-ba4c-a0ed22bc35e2"

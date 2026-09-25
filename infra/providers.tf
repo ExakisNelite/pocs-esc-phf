@@ -16,3 +16,15 @@ terraform {
     }
   }
 }
+
+provider "azurerm" {
+  resource_provider_registrations = "all"
+  features {
+    key_vault {
+      purge_soft_delete_on_destroy    = true
+      recover_soft_deleted_key_vaults = true
+    }
+  }
+  subscription_id     = var.subscription_id
+  storage_use_azuread = true
+}
