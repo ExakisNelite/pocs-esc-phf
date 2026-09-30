@@ -1,0 +1,7 @@
+node_modules/
+results/
+config.json
+*.tmp
+.venv/
+__pycache__/
+*.pyc
