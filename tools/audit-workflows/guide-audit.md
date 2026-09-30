@@ -8,7 +8,7 @@ Ce document est la **procédure à suivre pour réaliser l'audit**. Il combine l
 | [README.md](README.md) | Pour consulter les options, formats et limites techniques |
 | [plan-implementation.md](plan-implementation.md) | Pour comprendre la conception et les extensions possibles ; pas comme procédure d'exécution |
 
-**Il n'est pas nécessaire de créer les scripts Bash du plan.** Le moteur livré est [audit.py](audit.py). Python et `ruamel.yaml` suffisent ; Bash, curl, jq, yq et gh ne sont pas requis. Le wrapper [audit.sh](audit.sh) reste facultatif.
+**Il n'est pas nécessaire de créer les scripts Bash du plan.** Le moteur livré est [audit.py](audit.py). Python et `ruamel.yaml` suffisent pour le mode App ; le mode utilisateur nécessite aussi GitHub CLI et une session `gh auth login`. Bash, curl, jq et yq ne sont pas requis. Le wrapper [audit.sh](audit.sh) reste facultatif.
 
 ## 1. Comprendre le périmètre et le résultat attendu
 
@@ -35,9 +35,9 @@ Une référence statique ne prouve pas une exécution. L'outil ne lance aucun wo
 **Manuel, avant toute collecte réelle.**
 
 1. Noter l'organisation cible, le repository bibliothèque, le responsable de l'audit et la date. Faire confirmer le périmètre « branches par défaut, tous les repositories appartenant à l'organisation ».
-2. Demander à un propriétaire un inventaire indépendant, comprenant tous les repositories publics, privés, internes, archivés et forks. Il ne doit pas être limité par la visibilité de l'App d'audit. Faire confirmer sa date et sa source.
-3. Faire confirmer que la GitHub App est installée sur **All repositories**, sans restriction du token à une sous-liste. Pour le socle, les permissions sont `Metadata: read` et `Contents: read` ; aucun droit d'écriture n'est nécessaire.
-4. Préparer le mécanisme approuvé qui fournit le token d'installation. L'outil ne crée pas l'App, ne signe pas son JWT et ne gère pas sa clé privée.
+2. Demander à un propriétaire un inventaire indépendant, comprenant tous les repositories publics, privés, internes, archivés et forks. Il ne doit pas être limité par la visibilité du compte ou de l'App d'audit. Faire confirmer sa date et sa source.
+3. Choisir l'authentification : **utilisateur avec GitHub CLI**, ou **GitHub App**. En mode utilisateur, faire confirmer les accès de votre compte aux repositories, le SSO et les autorisations OAuth de l'organisation. En mode App, confirmer l'installation sur **All repositories**, sans restriction du token, avec `Metadata: read` et `Contents: read`.
+4. Préparer la session `gh auth login` ou le mécanisme approuvé du token d'installation. L'outil ne crée pas l'App, ne signe pas son JWT et ne gère pas sa clé privée. Il ne fait que des requêtes GET, mais le token utilisateur peut avoir des droits plus larges.
 5. Choisir un emplacement privé pour les résultats. Sur Windows, vérifier les ACL NTFS et les règles de synchronisation/sauvegarde. Ne pas supposer que `.gitignore` protège les fichiers contre les autres utilisateurs ou leur publication.
 
 Ne jamais mettre de token dans la configuration, les commandes, les documents ou les décisions de revue. Ne pas activer une transcription du terminal pouvant exposer les secrets.
@@ -49,7 +49,7 @@ Ne jamais mettre de token dans la configuration, les commandes, les documents ou
 Les commandes suivantes sont pour **PowerShell sous Windows**. Depuis la racine du repository, se placer dans le dossier de l'outil une seule fois :
 
 ```powershell
-Set-Location scripts/audit-workflows
+Set-Location tools/audit-workflows
 ```
 
 Toutes les commandes suivantes supposent ce dossier courant. Python 3.11+ est requis ; la version vérifiée dans ce workspace est Python 3.13.7.
@@ -106,6 +106,7 @@ Dans `config.json`, renseigner la cible et le chemin de l'inventaire :
   "library": "acme/ci-workflows",
   "apiUrl": "https://api.github.com",
   "apiVersion": "2026-03-10",
+  "authMode": "user",
   "expectedInventory": "results/preparation/organization-inventory.json",
   "maxDepth": 10,
   "maxEdges": 100000,
@@ -114,6 +115,8 @@ Dans `config.json`, renseigner la cible et le chemin de l'inventaire :
 ```
 
 `expectedInventory` est relatif au fichier de configuration. Vérifier manuellement que l'export est complet, lisible et concerne la même organisation. Si aucun inventaire n'est disponible, retirer ce champ et consigner la limitation ; ne pas fournir un inventaire réduit pour obtenir artificiellement une couverture complète.
+
+Cet exemple choisit la session utilisateur. Pour un token d'installation App, utiliser `"authMode": "app"`. L'absence de ce champ conserve le mode App pour les configurations existantes.
 
 Vérifier la configuration :
 
@@ -125,16 +128,35 @@ Vérifier la configuration :
 
 ## 5. Fournir l'authentification
 
-**Manuel, via le mécanisme approuvé.** Choisir une des deux possibilités :
+### Session utilisateur avec gh auth login
+
+Avec `"authMode": "user"`, installer GitHub CLI selon la procédure approuvée, puis ouvrir une session si nécessaire :
+
+```powershell
+gh auth login --hostname github.com --web
+gh auth status --active --hostname github.com
+```
+
+Vérifier le compte actif ; si plusieurs comptes sont configurés, choisir celui de l'audit avec `gh auth switch --hostname github.com --user VOTRE_LOGIN`. L'outil récupère son token en mémoire via `gh`, sans le montrer ni l'enregistrer. Ne pas lancer `gh auth token` manuellement pour afficher le secret, ni utiliser `--show-token`.
+
+Les tokens d'environnement sont ignorés par le fournisseur CLI par défaut, afin de ne pas remplacer la session connectée. Aucun `tokenCommand` n'est nécessaire. Vérifier le stockage sécurisé des credentials : GitHub CLI peut utiliser un fichier en clair si le coffre système n'est pas disponible.
+
+Les accès privés demandent généralement les scopes OAuth `repo` et `read:org`, ainsi que les droits réels du compte. Le SSO et les politiques OAuth peuvent nécessiter une autorisation supplémentaire. Un login réussi ne garantit pas l'accès à tous les repositories. L'inventaire indépendant reste nécessaire.
+
+### Token d'installation App
+
+Avec `"authMode": "app"`, choisir une des deux possibilités :
 
 | Possibilité | Action |
 | --- | --- |
 | Token dans l'environnement | Injecter `GITHUB_TOKEN` ou `GH_TOKEN` dans le processus qui lance Python, sans afficher sa valeur |
 | Fournisseur de tokens | Ajouter un `tokenCommand` approuvé et effectivement installé, capable de retourner un token ou un JSON avec `token` et éventuellement `expires_at` |
 
-`tokenCommand` est un tableau d'arguments, pas une commande shell. Il n'existe pas de fournisseur intégré. Le format et le renouvellement sont décrits dans le [README.md](README.md). Ne pas y mettre de secret en argument.
+`tokenCommand` est un tableau d'arguments, pas une commande shell. Aucun fournisseur de token d'installation n'est intégré. Le format et le renouvellement sont décrits dans le [README.md](README.md). Ne pas y mettre de secret en argument.
 
 Un token expiré doit être renouvelé. Pour utiliser un fournisseur lors d'une reprise, repasser `--config config.json` ; son programme n'est pas conservé dans le manifeste des résultats.
+
+En mode utilisateur, une reprise sans `--config` reconstruit le fournisseur CLI par défaut. Si la session est invalide, se reconnecter avant la reprise. Un `tokenCommand` explicite peut remplacer ce fournisseur ; il devient alors responsable de la sélection des credentials.
 
 **Point de passage :** les credentials sont disponibles dans le bon terminal, mais ne sont présents dans aucun fichier de configuration ou livrable.
 
@@ -191,7 +213,7 @@ Une organisation complètement scannée peut avoir un graphe incomplet, et inver
 | --- | --- |
 | Interruption, token expiré, quota, échec temporaire ou fichier non téléchargé | Corriger la cause, renouveler l'authentification si nécessaire, puis `resume` |
 | Repository absent de l'inventaire visible, inventaire indépendant corrigé ou nouveaux repositories | Nouveau `run` : l'inventaire existant est figé |
-| Workflow corrigé sur GitHub, branche/tag déplacé, nouvelle bibliothèque ou nouvelles limites | Nouveau `run` pour analyser le nouvel état |
+| Workflow corrigé sur GitHub, branche/tag déplacé, nouvelle bibliothèque, nouvelles limites ou changement App/utilisateur | Nouveau `run` pour analyser le nouvel état |
 | Besoin de régénérer uniquement les documents à partir des données déjà collectées | `report`, sans token ni accès GitHub |
 
 ```powershell

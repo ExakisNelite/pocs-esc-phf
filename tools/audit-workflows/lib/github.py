@@ -94,35 +94,46 @@ def _redact(value):
 
 class GitHub:
     def __init__(self, *, directory: Path, base_url: str = "https://api.github.com", version: str = "2026-03-10",
-                 token_command: list[str] | None = None, fetch_impl: Callable = transport,
+                 token_command: list[str] | None = None, auth_mode: str = "app", fetch_impl: Callable = transport,
                  wait: Callable = time.sleep, max_attempts: int = 4, max_wait_ms: int = 300_000):
         base = urlsplit(base_url)
         if base.scheme != "https" or not base.hostname or base.username or base.password or base.query or base.fragment:
             raise ValueError("API URL must use HTTPS, without credentials, query or fragment")
+        if auth_mode not in ("app", "user"):
+            raise ValueError("authMode must be app or user")
         if token_command is not None and (not isinstance(token_command, list) or not token_command or
                                           not all(isinstance(argument, str) for argument in token_command)):
             raise ValueError("tokenCommand must be an argument array")
         self.base_url = base_url.rstrip("/")
         self.version = version
         self.directory = local_path(directory)
-        self.token_command = token_command
+        self.cli_auth = auth_mode == "user" and token_command is None
+        host = "github.com" if base.hostname == "api.github.com" else base.hostname
+        self.token_command = ["gh", "auth", "token", "--hostname", host] if self.cli_auth else token_command
         self.fetch = fetch_impl
         self.wait = wait
         self.max_attempts = max_attempts
         self.max_wait_ms = max_wait_ms
-        self.token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        self.token = None if auth_mode == "user" else os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         self.expires_at = None
 
     def refresh_token(self) -> None:
         if not self.token_command:
             raise ValueError("Provide GITHUB_TOKEN or an approved tokenCommand; never put secrets in config")
+        environment = os.environ.copy()
+        if self.cli_auth:
+            for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+                environment.pop(name, None)
+            environment["GH_PROMPT_DISABLED"] = "1"
         try:
             response = subprocess.run(self.token_command, check=True, capture_output=True, text=True,
-                                      timeout=60, shell=False)
+                                      timeout=60, shell=False, env=environment)
             stdout = response.stdout
             if len(stdout) > 64 * 1024:
                 raise ValueError("Provider output too large")
         except (OSError, subprocess.SubprocessError, ValueError):
+            if self.cli_auth:
+                raise ValueError("GitHub CLI authentication failed; install gh and run gh auth login for the configured host. Provider output is not logged.") from None
             raise ValueError("Approved token provider failed; its output is not logged") from None
         try:
             content = json.loads(stdout)

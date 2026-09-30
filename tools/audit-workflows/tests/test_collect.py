@@ -1,13 +1,17 @@
 import base64
 import hashlib
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from audit import configuration, main
 from lib.collect import Collector, reconcile
-from lib.github import ApiError, GitHub
+from lib.github import ApiError, GitHub, write_json
 
 
 COMMIT = "a" * 40
@@ -51,6 +55,50 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(next(repo for repo in result if repo["id"] == 2)["discovery"], "not_visible_to_token")
         self.assertTrue(next(repo for repo in result if repo["id"] == 1)["fork"])
+
+    def test_user_inventory_uses_authenticated_org_listing(self):
+        calls = []
+        repositories = [{"id": 1, "full_name": "acme/library", "owner": {"login": "acme"},
+                         "private": True, "archived": True, "fork": True}]
+        def fetch(address, headers):
+            calls.append(address)
+            return response({"login": "auditor"} if urlsplit(address).path == "/user" else repositories)
+        client = GitHub(directory=self.directory / "api", fetch_impl=fetch)
+        client.token = "test-not-a-token"
+        collector = Collector(client=client, directory=self.directory, config={**CONFIG, "authMode": "user"})
+        inventory = collector.inventory([{"id": 1, "full_name": "acme/library"}, {"id": 2, "full_name": "acme/hidden"}])
+        self.assertEqual(inventory["userLogin"], "auditor")
+        self.assertEqual(inventory["authMode"], "user")
+        self.assertTrue(inventory["repositories"][1]["archived"])
+        self.assertEqual(inventory["repositories"][0]["discovery"], "not_visible_to_token")
+        self.assertFalse(any("/installation/" in address for address in calls))
+        self.assertIn("type=all", calls[1])
+        self.assertEqual(collector.inventory(None), inventory)
+        self.assertEqual(len(calls), 2)
+
+    def test_user_inventory_denial_is_fatal(self):
+        client = GitHub(directory=self.directory / "api", fetch_impl=lambda address, headers:
+                        response({"login": "auditor"}) if urlsplit(address).path == "/user" else response({}, 403))
+        client.token = "test-not-a-token"
+        collector = Collector(client=client, directory=self.directory, config={**CONFIG, "authMode": "user"})
+        with self.assertRaises(ApiError):
+            collector.inventory(None)
+        self.assertFalse((self.directory / "data" / "inventory.json").exists())
+
+    def test_auth_mode_configuration_and_resume_guard(self):
+        config_path = self.directory / "config.json"
+        write_json(config_path, {"org": "acme", "library": "library"})
+        self.assertEqual(configuration(str(config_path))["authMode"], "app")
+        saved = configuration(str(config_path))
+        saved.pop("authMode")
+        write_json(self.directory / "data" / "run-manifest.json", {"config": saved, "mode": "github"})
+        write_json(config_path, {"org": "acme", "library": "library", "authMode": "user"})
+        self.assertEqual(configuration(str(config_path))["authMode"], "user")
+        with self.assertRaisesRegex(ValueError, "mismatch: authMode"):
+            main(["resume", "--run-dir", str(self.directory), "--config", str(config_path)])
+        write_json(config_path, {"org": "acme", "library": "library", "authMode": "invalid"})
+        with self.assertRaisesRegex(ValueError, "authMode"):
+            configuration(str(config_path))
 
     def test_annotated_tag_wins_over_branch(self):
         responses = {"/repos/acme/library/git/ref/tags/release%2F2026": {"object": {"type": "tag", "sha": "tag"}},
@@ -110,6 +158,28 @@ class GitHubTests(unittest.TestCase):
         client = GitHub(directory=self.directory, fetch_impl=fetch, wait=self.delays.append)
         client.token = "test-secret"
         return client
+
+    def test_user_auth_reads_gh_session_without_environment_token(self):
+        with patch.dict(os.environ, {"GH_TOKEN": "other-secret", "GITHUB_TOKEN": "other-secret"}):
+            client = GitHub(directory=self.directory, auth_mode="user",
+                            fetch_impl=lambda address, headers: response({"login": "auditor"}))
+            self.assertIsNone(client.token)
+            with patch("lib.github.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "session-secret\n", "")) as provider:
+                client.get("/user", cache=False)
+            self.assertEqual(provider.call_args.args[0], ["gh", "auth", "token", "--hostname", "github.com"])
+            self.assertFalse(provider.call_args.kwargs["shell"])
+            self.assertNotIn("GH_TOKEN", provider.call_args.kwargs["env"])
+            self.assertNotIn("GITHUB_TOKEN", provider.call_args.kwargs["env"])
+            self.assertEqual(client.token, "session-secret")
+        for path in self.directory.rglob("*.json*"):
+            self.assertNotIn("session-secret", path.read_text())
+
+    def test_cli_failure_does_not_expose_output(self):
+        client = GitHub(directory=self.directory, auth_mode="user")
+        with patch("lib.github.subprocess.run", side_effect=subprocess.CalledProcessError(1, "gh", output="secret", stderr="secret")):
+            with self.assertRaisesRegex(ValueError, "gh auth login") as caught:
+                client.refresh_token()
+        self.assertNotIn("secret", str(caught.exception))
 
     def test_pagination(self):
         count = 0

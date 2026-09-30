@@ -57,15 +57,26 @@ class Collector:
         saved = read_json(destination)
         if saved is not None:
             return saved
-        installation = self.client.paginate("/installation/repositories", "repositories")
+        auth_mode = self.config.get("authMode", "app")
+        user_login = None
         organization = []
         organization_error = None
-        try:
+        if auth_mode == "user":
+            user = self.client.get("/user", cache=False)["body"]
+            if not isinstance(user, dict) or not isinstance(user.get("login"), str) or not user["login"]:
+                raise ValueError("Expected an authenticated GitHub user")
+            user_login = user["login"]
+            installation = []
             organization = self.client.paginate(f"/orgs/{encode(self.config['org'])}/repos?type=all&sort=full_name&direction=asc")
-        except Exception as error:
-            organization_error = failure(error)
+        else:
+            installation = self.client.paginate("/installation/repositories", "repositories")
+            try:
+                organization = self.client.paginate(f"/orgs/{encode(self.config['org'])}/repos?type=all&sort=full_name&direction=asc")
+            except Exception as error:
+                organization_error = failure(error)
         repositories = {repo["id"]: repo for repo in [*organization, *installation]}
         result = {"collectedAt": timestamp(), "expectedInventoryProvided": expected is not None,
+                  "authMode": auth_mode, "userLogin": user_login,
                   "organizationError": organization_error, "repositories": reconcile(list(repositories.values()), expected, self.config["org"]),
                   "expectedIds": [repo["id"] for repo in expected] if expected is not None else None}
         write_json(destination, result)

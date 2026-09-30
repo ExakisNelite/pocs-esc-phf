@@ -8,6 +8,8 @@ Le [guide d'utilisation](README.md) décrit désormais un outil exécutable : [a
 
 La démonstration et les tests fonctionnent sans token ni accès à votre organisation. Consultez les limites documentées avant l'utilisation réelle : l'outil automatise le socle statique, mais pas tous les enrichissements facultatifs de ce plan. Aucun audit de votre organisation n'a été lancé.
 
+Le moteur supporte également `"authMode": "user"` après `gh auth login`, sans GitHub App. Suivre le [guide opérationnel](guide-audit.md) pour ce mode ; les hypothèses et exemples App du plan ci-dessous restent la conception historique.
+
 ## Contexte confirmé avant les commandes
 
 - Hébergement : **GitHub Enterprise Cloud**, API `https://api.github.com`.

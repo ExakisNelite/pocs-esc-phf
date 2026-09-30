@@ -20,7 +20,7 @@ USAGE = """Reusable workflow audit (Python >=3.11)
   python audit.py demo   [--run-dir results/demo]
 
 check does not contact GitHub. demo uses only simulated responses.
-run/resume use a GitHub App installation token from GITHUB_TOKEN or an approved provider.
+run/resume use authMode=app (installation token) or authMode=user (gh auth login).
 Exit codes: 0 = finished; 2 = incomplete coverage or contract findings; 1 = fatal error.
 """
 
@@ -40,7 +40,7 @@ def configuration(path: str | None) -> dict:
         raise ValueError("--config is required")
     source = Path(path).resolve()
     data = read_json(source)
-    allowed = {"org", "library", "apiUrl", "apiVersion", "expectedInventory", "tokenCommand", "maxDepth", "maxEdges", "maxFileBytes"}
+    allowed = {"org", "library", "apiUrl", "apiVersion", "authMode", "expectedInventory", "tokenCommand", "maxDepth", "maxEdges", "maxFileBytes"}
     if not isinstance(data, dict) or set(data) - allowed:
         raise ValueError("Unknown configuration field; credentials must not be in config")
     if not isinstance(data.get("org"), str) or not re.fullmatch(r"[a-zA-Z0-9-]+", data["org"]):
@@ -52,7 +52,7 @@ def configuration(path: str | None) -> dict:
         library = data["org"] + "/" + library
     if not re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+", library) or library.split("/")[0].lower() != data["org"].lower():
         raise ValueError("library must belong to org")
-    config = {"apiUrl": "https://api.github.com", "apiVersion": "2026-03-10", "maxDepth": 10,
+    config = {"apiUrl": "https://api.github.com", "apiVersion": "2026-03-10", "authMode": "app", "maxDepth": 10,
               "maxEdges": 100_000, "maxFileBytes": 2 * 1024 * 1024, **data, "library": library}
     for name, maximum in (("maxDepth", 10), ("maxEdges", 1_000_000), ("maxFileBytes", 10 * 1024 * 1024)):
         if type(config[name]) is not int or not 1 <= config[name] <= maximum:
@@ -63,7 +63,7 @@ def configuration(path: str | None) -> dict:
         config["expectedInventory"] = str((source.parent / config["expectedInventory"]).resolve())
     if not isinstance(config["apiUrl"], str):
         raise ValueError("Invalid apiUrl")
-    GitHub(base_url=config["apiUrl"], token_command=config.get("tokenCommand"), directory=Path("."))
+    GitHub(base_url=config["apiUrl"], token_command=config.get("tokenCommand"), auth_mode=config["authMode"], directory=Path("."))
     return config
 
 
@@ -83,7 +83,9 @@ def main(arguments: list[str] | None = None) -> int:
     if command == "check":
         config = configuration(args.get("--config"))
         print(f"Python {sys.version.split()[0]}; YAML 1.2 parser loaded; config valid for {config['org']}.")
-        if not os.environ.get("GITHUB_TOKEN") and not os.environ.get("GH_TOKEN") and not config.get("tokenCommand"):
+        if config["authMode"] == "user":
+            print("User authentication selected; gh login/provider and permissions are not checked. No API calls performed.")
+        elif not os.environ.get("GITHUB_TOKEN") and not os.environ.get("GH_TOKEN") and not config.get("tokenCommand"):
             print("Authentication not injected yet. No API calls performed.")
         if not config.get("expectedInventory"):
             print("Independent inventory missing: organization-wide coverage will remain unverified.")
@@ -103,8 +105,8 @@ def main(arguments: list[str] | None = None) -> int:
         config = dict(manifest["config"])
         if "--config" in args:
             provided = configuration(args["--config"])
-            for name in ("org", "library", "apiUrl", "apiVersion", "maxDepth", "maxEdges", "maxFileBytes"):
-                if provided[name] != config[name]:
+            for name in ("org", "library", "apiUrl", "apiVersion", "authMode", "maxDepth", "maxEdges", "maxFileBytes"):
+                if provided[name] != config.get(name, "app" if name == "authMode" else None):
                     raise ValueError(f"Resume configuration mismatch: {name}")
             config["tokenCommand"] = provided.get("tokenCommand")
         expected = read_json(directory / "data" / "expected-inventory.json")
@@ -122,7 +124,7 @@ def main(arguments: list[str] | None = None) -> int:
     if manifest["mode"] == "offline_demo":
         client, expected = demo_client(directory / "data" / "raw" / "api", config)
     else:
-        client = GitHub(directory=directory / "data" / "raw" / "api", base_url=config["apiUrl"], version=config["apiVersion"], token_command=config.get("tokenCommand"))
+        client = GitHub(directory=directory / "data" / "raw" / "api", base_url=config["apiUrl"], version=config["apiVersion"], token_command=config.get("tokenCommand"), auth_mode=config.get("authMode", "app"))
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = directory / ".audit.lock"
     try:

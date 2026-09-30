@@ -6,7 +6,7 @@ Local tooling for a static GitHub Enterprise Cloud audit. It collects default-br
 
 ## Quick Start
 
-Requirements: Python 3.11 or newer and pip. Tested locally on Python 3.13.7 / Windows. Bash is optional; PowerShell can call the same CLI directly. The implementation uses Python's standard library and the pinned `ruamel.yaml` parser rather than the conceptual curl/jq/yq examples in the implementation plan. No Node.js, npm, gh login, yq or Azure access is required.
+Requirements: Python 3.11 or newer and pip. Tested locally on Python 3.13.7 / Windows. Bash is optional; PowerShell can call the same CLI directly. The implementation uses Python's standard library and the pinned `ruamel.yaml` parser rather than the conceptual curl/jq/yq examples in the implementation plan. No Node.js, npm, yq or Azure access is required. User-session authentication additionally requires GitHub CLI and `gh auth login`; offline commands and App authentication do not.
 
 From this directory, in PowerShell (activation is not required):
 
@@ -45,8 +45,9 @@ Optional fields:
 
 | Field | Meaning |
 | --- | --- |
+| `authMode` | `app` (default, installation token) or `user` (stored GitHub CLI session by default) |
 | `expectedInventory` | Path to an independently supplied organization inventory, relative to the config file |
-| `tokenCommand` | Argument array for an approved executable that supplies or renews an installation token |
+| `tokenCommand` | Argument array for an approved token provider; overrides the default `gh` provider in user mode |
 | `maxDepth` | Total workflow nesting limit, including the top-level caller; default/maximum 10 |
 | `maxEdges` | Maximum graph routes; default 100000; hitting the limit makes dependency coverage partial |
 | `maxFileBytes` | Per-workflow size limit; default 2 MiB, configurable up to 10 MiB |
@@ -55,7 +56,7 @@ Optional fields:
 
 Unknown fields are rejected. Do not put credentials in this file or in command arguments. Avoid putting sensitive arguments in `tokenCommand`: configure its executable to use your approved local secret store.
 
-An independent inventory is a JSON array, supplied by an organization owner or an authoritative process **not limited by the audit App's visibility**:
+An independent inventory is a JSON array, supplied by an organization owner or an authoritative process **not limited by the audit token's visibility**:
 
 ```json
 [
@@ -67,6 +68,29 @@ An independent inventory is a JSON array, supplied by an organization owner or a
 Example config extension: `"expectedInventory": "organization-inventory.json"`. Include public, private, internal, archived and fork repositories. Repository IDs, not names alone, drive reconciliation. An export made using the same restricted token cannot independently prove completeness. The toolkit preserves extra visible repositories and marks absent expected repositories `not_visible_to_token`.
 
 ## Authentication
+
+### User Session After gh Login
+
+Set `"authMode": "user"` in your local config, alongside your existing organization, library and inventory settings. No token value or `tokenCommand` is needed. From the same user account and terminal environment:
+
+```powershell
+gh auth login --hostname github.com --web
+gh auth status --active --hostname github.com
+.venv\Scripts\python.exe audit.py check --config config.json
+.venv\Scripts\python.exe audit.py run --config config.json --run-dir results/my-user-audit
+```
+
+Login is unnecessary if the correct account is already authenticated. If multiple accounts are configured, select the intended active account with `gh auth switch --hostname github.com --user YOUR_LOGIN`. Do not use `--show-token`, manually print `gh auth token`, or paste a token into config.
+
+Python captures `gh auth token --hostname github.com` privately, without a shell, and keeps its output in memory. The child process ignores `GH_TOKEN`, `GITHUB_TOKEN` and their enterprise equivalents so that unrelated environment tokens cannot override the stored session. Explicit `tokenCommand` providers are responsible for their own credential selection. `check` does not execute the provider or validate the login.
+
+User mode validates `/user` and paginates `/orgs/<org>/repos?type=all`. A denied organization listing stops inventory collection rather than masquerading as an empty organization. `data/inventory.json` records the authenticated login and mode, but not the token. Repositories that the account cannot see still require reconciliation against an independent inventory.
+
+For private repositories, the CLI OAuth token generally needs `repo` and `read:org` scopes, plus access through the user's organization membership/teams. SSO authorization and organization/enterprise OAuth restrictions can still block access. Obtain approval as needed. Standard CLI login can grant broader capabilities than this read-only audit needs; the toolkit itself only makes GET requests. Verify that CLI credentials use the system credential store: `gh` can fall back to a plain-text file if the store is unavailable.
+
+Resume can reuse this mode without a local config because the default CLI provider is reconstructed from the manifest. Re-authenticate yourself if the stored session is invalid; the tool cannot perform an interactive login. Changing from App to user authentication requires a **new run directory**, not resume. Outside `api.github.com`, the CLI host defaults to the API hostname; custom host/provider behavior has not been integration-tested here.
+
+### GitHub App Installation
 
 Use a GitHub App installation token with `Metadata: read` and `Contents: read`. The App should be installed on **All repositories**, with no token-level repository restriction. Static analysis does not need write permissions. The first authenticated inventory endpoint is `/installation/repositories`, not `/user`.
 
@@ -88,7 +112,7 @@ For resume with a provider, pass the local config again. A plain environment tok
 # Local tools/config check only, without GitHub requests
 .venv\Scripts\python.exe audit.py check --config config.json
 
-# You run the real audit after injecting your installation token
+# Real audit after gh login (user mode) or token injection (App mode)
 .venv\Scripts\python.exe audit.py run --config config.json --run-dir results/my-audit
 
 # Retry unfinished files/targets without changing saved default-branch SHAs
@@ -102,7 +126,7 @@ In Bash, replace `.venv\Scripts\python.exe audit.py` with `bash audit.sh` and ke
 
 Do not run two collectors on the same directory. A lock prevents this. After an abrupt process termination, verify that no process is still running before removing `.audit.lock`. API and collection failures keep existing checkpoints. A collection interrupted before `data/audit.json` is written must be resumed before reports can be generated.
 
-Resume freezes the saved repository inventory, default-branch snapshots and successful reference resolutions. It retries partial/inaccessible scans and unresolved calls. To refresh inventory or deliberately observe a newer branch/ref, start a **new run directory**. Configuration changes to targets or limits require a new run. Individual snapshots are taken at different times; this is not an atomic organization-wide snapshot.
+Resume freezes the saved repository inventory, default-branch snapshots and successful reference resolutions. It retries partial/inaccessible scans and unresolved calls. To refresh inventory or deliberately observe a newer branch/ref, start a **new run directory**. Configuration changes to targets, authentication mode or limits require a new run. Older manifests without `authMode` retain App behavior. Individual snapshots are taken at different times; this is not an atomic organization-wide snapshot.
 
 Exit codes:
 
@@ -164,7 +188,7 @@ Organization coverage is only `complete_against_supplied_inventory` if the indep
 
 ## What Is Automated
 
-- Installation and organization inventories are paginated, merged by ID and filtered to the actual owning organization. No visibility, archived or fork filter is applied.
+- App mode merges paginated installation and organization inventories by ID; user mode uses an authenticated organization listing. Results are filtered to the actual owning organization. No visibility, archived or fork filter is applied.
 - Caller default branches are pinned to commit SHAs. Non-recursive Git trees avoid silently truncated recursive listings.
 - Workflow bytes are downloaded through the Git Blob API and checked against the Git SHA-1 blob identity before parsing and after reading saved evidence.
 - YAML 1.2 parsing preserves `on`, empty `workflow_call`, literal false values and defaults. Duplicate keys, multi-document YAML and malformed job structures become collection errors.
@@ -195,6 +219,6 @@ This is not a complete GitHub Actions schema validator. Unsupported YAML constru
 
 Keep the entire run directory private, including reports. The toolkit ignores its default `results/`, local `config.json`, `.venv/` and Python bytecode in Git. If you choose a directory elsewhere or a different local config filename, add equivalent exclusions yourself. File modes are requested as 0600/0700 on Unix; Windows users must apply appropriate NTFS access controls. Never publish evidence automatically.
 
-`python -m unittest discover -s tests -t . -v` uses Python's native test runner with local temporary directories and fake HTTP responses. It covers parsing, contracts, inventory reconciliation, retries, pagination, SHA snapshots, tag precedence, nested calls, coverage gaps, report safety and CLI demo/resume/report. When the optional earlier `results/demo` fixture is present, an additional test copies it to a temporary directory and verifies Python report/resume compatibility without modifying the original. No organization audit is performed by the tests. Real App permissions and GitHub API behavior still need validation when you run the real collection.
+`python -m unittest discover -s tests -t . -v` uses Python's native test runner with local temporary directories and fake HTTP responses. It covers parsing, contracts, both authentication modes, session token handling, inventory reconciliation, retries, pagination, SHA snapshots, tag precedence, nested calls, coverage gaps, report safety and CLI demo/resume/report. When the optional earlier `results/demo` fixture is present, an additional test copies it to a temporary directory and verifies Python report/resume compatibility without modifying the original. No organization audit is performed by the tests. Real App/CLI credentials, permissions and GitHub API behavior still need validation when you run the real collection.
 
 See [the implementation plan](plan-implementation.md) for the broader design and future enhancements.
