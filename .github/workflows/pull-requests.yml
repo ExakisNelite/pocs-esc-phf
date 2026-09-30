@@ -25,8 +25,8 @@ jobs:
     uses: ./.github/workflows/pr-notification.yml
     secrets: inherit
     with:
-      notify_actions: 'opened,reopened,closed,merged'
-      title_prefix: 'Pull Request Contoso'
+      notify_actions: 'opened,closed,merged'
+      title_prefix: 'Pull Request ${{ github.event.pull_request.title }}'
 
   monitor-pr:
     uses: ./.github/workflows/pr-monitoring.yml

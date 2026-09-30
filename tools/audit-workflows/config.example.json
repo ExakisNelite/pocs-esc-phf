@@ -1,0 +1,10 @@
+{
+  "org": "example",
+  "library": "example/workflows",
+  "apiUrl": "https://api.github.com",
+  "apiVersion": "2026-03-10",
+  "authMode": "app",
+  "maxDepth": 10,
+  "maxEdges": 100000,
+  "maxFileBytes": 2097152
+}
