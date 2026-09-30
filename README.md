@@ -1,1 +1,1 @@
-Lorem ipsum Test 2 
+Test
